@@ -1,100 +1,129 @@
-# TinyML-Based BER Predictor for CWDM Optical Systems
+# TinyML-Enabled Intelligent Optical Communication System
  
-A course project for **Optical Fiber Communication**, combining an 8-channel CWDM optical link simulation in **OptiSystem** with a lightweight neural network deployed on an **ESP32-WROOM** microcontroller (no TensorFlow Lite runtime — hand-rolled forward pass) to predict Bit Error Rate (BER) performance in real time.
+A course project for **Optical Fiber Communication** (VIT Vellore), presenting a TinyML-based intelligent monitoring system that predicts signal loss / BER performance for an 8-channel CWDM optical link, simulated in **OptiSystem** and deployed on an **ESP-32 WROOM** microcontroller.
+ 
+This work has been written up as an IEEE-formatted paper: *"TinyML-Enabled Intelligent Optical Communication System: Design, Implementation, and Comparative Performance Analysis"* (see `docs/`).
  
 ---
  
 ## 📡 Project Overview
  
-The goal of this project was to bridge optical system simulation with edge machine learning:
+Traditional optical link monitoring relies on fixed threshold-based mechanisms that miss nonlinear relationships between system parameters, causing high false-alarm rates and delayed fault detection. This project explores whether a very small neural network — small enough to run on a $8.50 microcontroller — can outperform threshold-based monitoring while using a fraction of the power and cost of an Edge ML solution (e.g., Raspberry Pi).
  
-1. Simulate an 8-channel CWDM (Coarse Wavelength Division Multiplexing) optical communication link in OptiSystem and sweep system parameters to generate a dataset of Q-factor and BER values.
-2. Train a small feed-forward neural network on this dataset.
-3. Convert the trained model into a **TinyML** deployment that runs directly on an ESP32-WROOM — without relying on the TensorFlow Lite Micro library — by hard-coding the trained weights and implementing the forward pass manually in C/C++.
-4. Verify that the microcontroller can take live Q-factor/BER-related inputs over Serial and produce a real-time prediction.
-This demonstrates an end-to-end pipeline: **optical system modeling → data generation → ML training → edge deployment.**
+**Pipeline:** OptiSystem CWDM simulation → data collection & augmentation → compact neural network training → int8 quantization → deployment on ESP-32 WROOM → real-time inference over Serial.
  
 ---
  
 ## 🧪 OptiSystem Simulation Setup
  
-The optical link was modeled as an 8-channel CWDM system:
+An 8-channel CWDM link was modeled in OptiSystem to generate realistic, physically-grounded training data.
  
-| Parameter | Value |
-|---|---|
-| Number of channels | 8 |
-| Channel wavelengths | 1550, 1570, 1590, 1610, 1630, 1650, 1670, 1690 nm |
-| Bit rate | 2.5 Gbit/s per channel |
-| Sequence length | 1024 bits |
-| Samples per bit | 32 |
-| Sample rate | 8 × 10¹⁰ Hz |
-| Symbol rate | 1 × 10¹⁰ symbols/s |
-| Fiber length | 100 km (Optical Fiber CWDM) |
-| Sweep iterations | 20 |
+| Parameter | Unit | Min | Max |
+|---|---|---|---|
+| Bit Rate | Gbps | 10 | 100 |
+| Transmission Power | dBm | -10 | 10 |
+| Fiber Length | km | 50 | 500 |
+| Attenuation Coefficient | dB/km | 0.2 | 0.35 |
+| Chromatic Dispersion | ps/nm/km | 16 | 20 |
+| Nonlinear Coefficient | W⁻¹km⁻¹ | 1.2 | 2.5 |
+| Amplifier Gain | dB | 15 | 30 |
+| Noise Figure | dB | 4 | 8 |
  
-**Signal chain per channel:** CW Laser → Pseudo-Random Bit Sequence Generator (NRZ/BiNRZ) → Mach-Zehnder Modulator (Analytical) → WDM Mux (8×1) → CWDM Fiber (100 km) → WDM Demux (1×8) → PIN Photodiode → Low-Pass Bessel Filter → 3R Regenerator → BER Analyzer, with Optical Spectrum Analyzers monitoring the multiplexed and demultiplexed signals.
+Fiber impairments — attenuation, chromatic dispersion, and nonlinear effects — along with amplifier gain and noise were included so the dataset captures both stable and degraded link conditions.
  
-The system was swept over 20 iterations, and for each iteration the **Q-factor** and **BER** were logged for every channel — producing the labeled dataset used for training.
+**Initial data collection:** 1000 samples, spanning BER (10⁻¹² to 10⁻³), Q-factor (2–12 dB), and loss percentage (0–35%).
  
 ---
  
-## 📊 Dataset
+## 🔁 Data Augmentation
  
-BER Analyzer results were exported across all 20 sweep iterations and 8 channels, capturing:
-- **Max Q-Factor** per iteration/channel
-- **Min BER** per iteration/channel
-These paired (Q-factor, BER) values form the training data for the TinyML predictor. Q-factor values ranged roughly from ~4 to ~165+ across the sweep, with corresponding BER values spanning from measurable error rates down to effectively error-free (BER → 0) operation — giving the model a wide dynamic range to learn from.
+To improve generalization, the original 1000 samples were expanded to 5000+ samples using a three-part augmentation strategy while preserving physical validity:
+ 
+- **Interpolation** — linear mixing between adjacent samples, `d = α·D[a] + (1-α)·D[b]`, α ~ U(0,1)
+- **Noise injection** — Gaussian perturbation, `d = D[c] + ε`, ε ~ N(0, 0.01)
+- **Extrapolation** — controlled extension beyond observed samples within physical constraints, β ~ U(1, 1.2)
+A statistical comparison confirmed the augmented dataset preserved the original distribution (e.g., BER mean shifted by only 0.47%, Q-factor mean by 0.61%).
  
 ---
  
 ## 🧠 Model Architecture
  
-A minimal fully-connected network was chosen to keep the model small enough for microcontroller deployment:
+The final architecture reported in the paper, optimized under a strict `Memory(θ) < 5KB` constraint:
  
-```
-Input (2 features: Q-factor, BER)
-        ↓
-Dense Layer 1 — 6 neurons, ReLU activation
-        ↓
-Dense Layer 2 — 1 neuron, Linear activation (output)
-```
+| Layer | Type | Neurons | Activation | Parameters |
+|---|---|---|---|---|
+| Input | Dense | 2 | Linear | – |
+| Hidden 1 | Dense | 8 | ReLU | 24 |
+| Hidden 2 | Dense | 4 | ReLU | 36 |
+| Output | Dense | 1 | Linear | 5 |
  
-- **Layer 1:** 2×6 weight matrix + 6 biases, ReLU activation
-- **Layer 2:** 6×1 weight matrix + 1 bias, linear output
-The model was trained offline (Keras/TensorFlow) and the resulting weights were extracted and hard-coded as `static const float` arrays for on-device inference — avoiding the overhead of the full TensorFlow Lite Micro interpreter.
+**Total: 65 parameters (53 trainable) — 4.2 KB quantized (int8)**
  
-A `.tflite` (`model.h`) export is also included in this repo for reference/comparison against the manual C implementation.
+**Training configuration:**
+- Optimizer: Adam (α = 0.001, β₁ = 0.9, β₂ = 0.999)
+- Loss: MSE + L2 regularization (λ = 0.001)
+- Batch size: 32, up to 100 epochs with early stopping (patience = 15) — converged at epoch 78
+- Validation split: 20%, stratified by loss range
+- Post-training int8 quantization for deployment
+> **Note:** The firmware currently in this repo implements an earlier **2 → 6 (ReLU) → 1 (Linear)** prototype. The 2 → 8 → 4 → 1 architecture above is the version reported in the paper. If the paper's architecture is the one you want published as the final result, the ESP32 sketch and `model.h` should be regenerated from that model before merging — otherwise, keep both and clearly label the 2→6→1 version as an earlier prototype in this README.
  
 ---
  
 ## 🔌 TinyML Deployment on ESP32-WROOM
  
-Rather than running the model through TensorFlow Lite Micro, the trained weights were embedded directly into the firmware and the forward pass was implemented from scratch in C++:
+Rather than using the full TensorFlow Lite Micro interpreter, the trained (quantized) weights are hard-coded into a lightweight C++ forward pass, keeping the firmware minimal and fast:
  
-- `predict(x1, x2)` performs the Dense(6, ReLU) → Dense(1) forward pass manually.
-- The ESP32 reads two floating-point values (Q-factor and BER) over **Serial (115200 baud)**.
-- The model computes and prints a prediction back over Serial with 6-decimal precision.
-This "no-framework" approach keeps the firmware extremely lightweight and fast, which is ideal for resource-constrained microcontrollers like the ESP32-WROOM.
+- Reads two floats (Q-factor, BER) over **Serial (115200 baud)**
+- Runs the manual forward pass
+- Prints the prediction back over Serial with 6-decimal precision
+**Reported on-device performance (paper, int8 quantized model):**
  
-**Example serial interaction:**
-```
-Enter Q-factor and BER separated by space:
-Example: 0.42 0.0001
+| Metric | Value |
+|---|---|
+| Inference latency | 2.3 ms |
+| Power consumption | 15 mW |
+| Model size | 4.2 KB |
+| Startup time | 15 ms |
+| MTBF | 50,000 hours |
  
-Input Q-factor: 0.42
-Input BER: 0.0001
-Model Output Prediction: 0.183245
-```
+---
+ 
+## 📊 Results
+ 
+### Accuracy vs. alternative approaches
+ 
+| Metric | TinyML (proposed) | Edge ML (Raspberry Pi 4) | Threshold-based | Non-intelligent |
+|---|---|---|---|---|
+| Accuracy (%) | 94.2 | 94.8 | 78.3 | N/A |
+| MAE (%) | 0.87 | 0.82 | 3.45 | N/A |
+| R² Score | 0.942 | 0.948 | 0.671 | N/A |
+| False Alarm Rate (%) | 5.8 | 5.2 | 21.7 | N/A |
+ 
+### Resource & cost efficiency
+ 
+| Metric | TinyML | Edge ML |
+|---|---|---|
+| Inference latency | 2.3 ms | 45 ms |
+| Power | 15 mW | 2500 mW |
+| Memory | 4.2 KB | 131,072 KB |
+| 5-year deployment cost | $93.25 | $903.00 |
+ 
+**Headline result:** the TinyML model achieves accuracy within ~0.6% of the much heavier Edge ML solution, while using 99.4% less power, 99.997% less memory, and costing 89.7% less over a 5-year deployment — a large accuracy gain over simple threshold-based monitoring, at a very small trade-off versus the full Edge ML pipeline.
+ 
+Statistical significance of the improvement over threshold-based monitoring was confirmed with a paired t-test (t = 12.47, p < 0.001).
  
 ---
  
 ## 🛠️ Repository Structure
  
 ```
-├── optisystem/          # OptiSystem project files (.osd) and sweep configs
-├── data/                 # Exported Q-factor / BER sweep results (all channels, 20 iterations)
-├── model_training/       # Training scripts / notebook, exported model.h (TFLite)
-├── firmware/             # ESP32 Arduino sketch (manual forward-pass inference)
+├── optisystem/            # OptiSystem project file (.osd) and layout screenshot
+├── data/                   # Q-factor / BER sweep results
+│   ├── cwdm_ber_dataset.csv
+│   └── raw/                # Original exported PDF report
+├── model_training/         # Training script/notebook, TFLite export (model.h)
+├── firmware/                # ESP32 Arduino sketch (manual forward-pass inference)
+├── docs/                    # IEEE paper (PDF)
 └── README.md
 ```
  
@@ -103,23 +132,32 @@ Model Output Prediction: 0.183245
 ## 🚀 Hardware Used
  
 - **ESP32-WROOM-32** development board
-- USB Serial connection for input/output (host PC or serial terminal)
+- USB Serial connection (115200 baud) for input/output
 ---
  
-## 📈 Results
+## 📚 Citation
  
-- Successfully simulated an 8-channel, 100 km CWDM link and generated a Q-factor/BER dataset across 20 sweep iterations.
-- Trained a compact 2→6→1 neural network capable of learning the relationship between the swept parameters and link BER performance.
-- Deployed the model on ESP32-WROOM with real-time inference over Serial, with no TensorFlow Lite runtime dependency — proving feasibility of BER prediction on low-cost edge hardware for optical network health monitoring.
+If you reference this work, please cite:
+ 
+> Jabeena A, Abisek S, Adithya T C, Viswin Kumar, Sanjay Krishna, Senapathy C, "TinyML-Enabled Intelligent Optical Communication System: Design, Implementation, and Comparative Performance Analysis," Department of Electronics and Communication Engineering / Department of Sensor and Biomedical Technology, Vellore Institute of Technology, Vellore, India.
+ 
 ---
  
 ## 🔭 Future Work
  
-- Expand training data with additional sweep parameters (launch power, fiber length, dispersion).
-- Compare manual inference accuracy/latency against TensorFlow Lite Micro on the same board.
-- Extend to multi-channel simultaneous prediction and integrate with a live optical testbed.
+As identified in the paper:
+- Multi-parameter integration (OSNR, dispersion, nonlinear effects)
+- On-device adaptive/incremental learning
+- Federated learning across distributed edge nodes
+- Hardware acceleration for sub-millisecond inference
+- Explainable AI for operator trust and regulatory compliance
+## ⚠️ Limitations
+ 
+- Requires retraining for updated network configurations
+- Constrained to BER and Q-factor as inputs
+- No redundancy against single-point failure
 ---
  
 ## 📚 Course Context
  
-Developed as a course project for **Optical Fiber Communication**, exploring the intersection of photonic system simulation and TinyML for real-time optical network diagnostics.
+Developed as a course project for **Optical Fiber Communication**, Vellore Institute of Technology, exploring the intersection of photonic system simulation and TinyML for real-time optical network diagnostics.
